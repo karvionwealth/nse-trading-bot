@@ -1,149 +1,86 @@
+import os
 import yfinance as yf
 import requests
-import time
 from datetime import datetime
 import pytz
 
-# 🔐 YOUR TELEGRAM CREDENTIALS (YOUR WORKING ONES)
-TELEGRAM_TOKEN = "8799155611:AAHGhz1BdI9q9G8omDKA8Hx6pwfQXjTGBnw"
-TELEGRAM_CHAT_ID = "8566469289"
-
-# NSE Stocks to monitor
-STOCKS = [
-    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-    "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
-    "AXISBANK.NS", "WIPRO.NS", "HCLTECH.NS"
-]
+# Read from GitHub Secrets (DO NOT hardcode)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 def send_telegram(message):
-    """Send message to your Telegram"""
+    """Send message to Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
         return True
-    except:
+    except Exception as e:
+        print(f"Error: {e}")
         return False
 
-def get_stock_signal(stock):
-    """Analyze a single stock"""
-    try:
-        ticker = yf.Ticker(stock)
-        hist = ticker.history(period="1mo")
-        
-        if len(hist) < 20:
-            return None
-        
-        df = hist.copy()
-        df['SMA20'] = df['Close'].rolling(window=20).mean()
-        df['SMA50'] = df['Close'].rolling(window=50).mean()
-        
-        # Calculate RSI
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        last_price = df['Close'].iloc[-1]
-        last_sma20 = df['SMA20'].iloc[-1]
-        last_sma50 = df['SMA50'].iloc[-1]
-        last_rsi = df['RSI'].iloc[-1]
-        
-        # Determine signal
-        if last_price > last_sma20 > last_sma50 and last_rsi < 65:
-            signal = "📈 CALL (BUY)"
-            target = round(last_price * 1.05, 2)
-            stoploss = round(last_price * 0.97, 2)
-        elif last_price < last_sma20 < last_sma50 and last_rsi > 35:
-            signal = "📉 PUT (SELL)"
-            target = round(last_price * 0.95, 2)
-            stoploss = round(last_price * 1.03, 2)
-        else:
-            signal = "⏸️ HOLD"
-            target = "-"
-            stoploss = "-"
-        
-        return {
-            'name': stock.replace('.NS', ''),
-            'price': round(last_price, 2),
-            'signal': signal,
-            'target': target,
-            'stoploss': stoploss,
-            'rsi': round(last_rsi, 1)
-        }
-    except:
-        return None
+def analyze_stocks():
+    """Analyze NSE stocks and generate signals"""
+    stocks = [
+        "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+        "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS"
+    ]
+    
+    calls = []
+    puts = []
+    
+    for stock in stocks[:7]:  # Check top 7 stocks
+        try:
+            ticker = yf.Ticker(stock)
+            hist = ticker.history(period="1mo")
+            
+            if len(hist) < 20:
+                continue
+            
+            df = hist.copy()
+            df['SMA20'] = df['Close'].rolling(window=20).mean()
+            last_price = df['Close'].iloc[-1]
+            last_sma20 = df['SMA20'].iloc[-1]
+            
+            # Simple logic
+            if last_price > last_sma20 * 1.01:
+                target = round(last_price * 1.05, 2)
+                stoploss = round(last_price * 0.97, 2)
+                calls.append((stock.replace('.NS', ''), last_price, target, stoploss))
+            elif last_price < last_sma20 * 0.99:
+                target = round(last_price * 0.95, 2)
+                stoploss = round(last_price * 1.03, 2)
+                puts.append((stock.replace('.NS', ''), last_price, target, stoploss))
+        except:
+            continue
+    
+    return calls, puts
 
 def send_daily_report():
-    """Generate and send daily trading report"""
+    """Generate and send trading report"""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
     
-    print(f"📊 Generating report at {date_str}")
+    calls, puts = analyze_stocks()
     
-    # Send header
-    message = f"🤖 <b>NSE TRADING SIGNALS</b>\n"
-    message += f"📅 {date_str}\n"
-    message += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
     
-    # Analyze each stock
-    calls = []
-    puts = []
-    
-    for stock in STOCKS:
-        result = get_stock_signal(stock)
-        if result:
-            if "CALL" in result['signal']:
-                calls.append(result)
-            elif "PUT" in result['signal']:
-                puts.append(result)
-    
-    # Add CALL signals
     if calls:
-        message += f"📈 <b>BUY (CALL) Signals</b>\n"
-        for c in calls[:5]:  # Max 5 stocks
-            message += f"• <b>{c['name']}</b>: ₹{c['price']}\n"
-            message += f"  → Target: ₹{c['target']} | SL: ₹{c['stoploss']}\n"
-            message += f"  RSI: {c['rsi']}\n\n"
+        message += f"📈 BUY (CALL) Signals:\n"
+        for name, price, target, sl in calls:
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
     else:
-        message += f"📈 No strong BUY signals today\n\n"
+        message += f"📈 No BUY signals today\n\n"
     
-    # Add PUT signals
     if puts:
-        message += f"📉 <b>SELL (PUT) Signals</b>\n"
-        for p in puts[:5]:
-            message += f"• <b>{p['name']}</b>: ₹{p['price']}\n"
-            message += f"  → Target: ₹{p['target']} | SL: ₹{p['stoploss']}\n"
-            message += f"  RSI: {p['rsi']}\n\n"
+        message += f"📉 SELL (PUT) Signals:\n"
+        for name, price, target, sl in puts:
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
     else:
-        message += f"📉 No strong SELL signals today\n\n"
+        message += f"📉 No SELL signals today\n\n"
     
-    # Add footer
-    message += f"━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"⚠️ <b>Risk Rules</b>\n"
-    message += f"• Entry at market price\n"
-    message += f"• Target: 5% profit\n"
-    message += f"• StopLoss: 3% loss\n"
-    message += f"• Max risk 2% per trade\n"
-    message += f"━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"🤖 NSE Auto Trading Bot"
-    
-    # Send to Telegram
+    message += f"━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Target: 5%"
     send_telegram(message)
-    print("✅ Report sent to Telegram!")
 
-# Send startup message
-send_telegram("✅ <b>NSE Trading Bot is ONLINE!</b>\n\nI will send you trading signals every morning at 9:15 AM IST.\n\nHappy Trading! 📈")
-
-print("🚀 NSE Trading Bot Started!")
-print("⏰ Will send signals daily at 9:15 AM IST")
-print("📱 Check your Telegram every morning")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-# Run once immediately for testing
-print("\n📊 Sending test report now...")
-send_daily_report()
-
-print("\n✅ Setup complete! Bot will run continuously")
-print("⚠️ Keep this window open OR deploy to Render for 24/7")
+if __name__ == "__main__":
+    send_daily_report()
