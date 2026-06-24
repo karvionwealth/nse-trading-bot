@@ -2,8 +2,8 @@ name: NSE Trading Bot
 
 on:
   schedule:
-    - cron: '45 3 * * *'  # 9:15 AM IST = 3:45 AM UTC
-  workflow_dispatch:
+    - cron: '45 3 * * *'   # 3:45 UTC = 9:15 AM IST
+  workflow_dispatch:       # Allows manual trigger
 
 jobs:
   run-bot:
