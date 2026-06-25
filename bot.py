@@ -10,7 +10,7 @@ import pytz
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# Indian stock universe (add more for better coverage)
+# Indian stock universe
 SYMBOLS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
     "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
@@ -33,14 +33,11 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-# ---------- INDICATORS (manual, no pandas-ta) ----------
+# ---------- INDICATORS ----------
 def compute_indicators(df):
-    """Add EMA, ATR, RSI, volume avg, and 20-day high to dataframe."""
-    # EMAs
     df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['Close'].ewm(span=50, adjust=False).mean()
 
-    # ATR (14)
     high, low, close = df['High'], df['Low'], df['Close']
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
@@ -48,7 +45,6 @@ def compute_indicators(df):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
 
-    # RSI (14)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -57,55 +53,54 @@ def compute_indicators(df):
     rs = avg_gain / avg_loss
     df['rsi'] = 100 - (100 / (1 + rs))
 
-    # Volume average (20)
     df['vol_avg20'] = df['Volume'].rolling(20).mean()
-
-    # 20-day rolling high
     df['high20'] = df['High'].rolling(20).max()
-
     return df
 
-# ---------- MAIN SCANNER ----------
+# ---------- SCANNER WITH DIAGNOSTICS ----------
 def find_breakout_candidates():
-    """Scan all symbols using yesterday's completed daily candle."""
     candidates = []
+    
+    # Counters for each filter
+    stats = {
+        'total': 0,
+        'near_high': 0,
+        'uptrend': 0,
+        'rsi_ok': 0,
+        'volume_surge': 0,
+        'higher_lows': 0
+    }
+    
     for symbol in SYMBOLS:
         try:
-            # Download 90 days of daily data (enough for indicators)
             df = yf.download(symbol, period="3mo", interval="1d", progress=False)
             if len(df) < 60:
                 continue
 
-            # Compute indicators
             df = compute_indicators(df)
+            latest = df.iloc[-1]
+            stats['total'] += 1
 
-            # Use the last completed row (yesterday's data)
-            today = df.iloc[-1]
-            yesterday = df.iloc[-2]
-
-            # --- Conditions ---
-            # 1. Price within 2% of 20-day high (breakout zone)
-            near_high = today['Close'] >= today['high20'] * 0.98
-
-            # 2. Uptrend: ema20 > ema50
-            uptrend = today['ema20'] > today['ema50']
-
-            # 3. RSI between 50 and 70 (not overbought but momentum)
-            rsi_ok = 50 < today['rsi'] < 70
-
-            # 4. Volume spike: yesterday's volume > 1.5× average
-            volume_surge = today['Volume'] > 1.5 * today['vol_avg20']
-
-            # 5. Higher lows in last 10 days vs prior 10 days
+            # Check each condition individually
+            near_high = latest['Close'] >= latest['high20'] * 0.98
+            uptrend = latest['ema20'] > latest['ema50']
+            rsi_ok = 50 < latest['rsi'] < 70
+            volume_surge = latest['Volume'] > 1.5 * latest['vol_avg20']
             higher_lows = df['Low'].iloc[-10:].min() > df['Low'].iloc[-20:-10].min()
 
+            if near_high: stats['near_high'] += 1
+            if uptrend: stats['uptrend'] += 1
+            if rsi_ok: stats['rsi_ok'] += 1
+            if volume_surge: stats['volume_surge'] += 1
+            if higher_lows: stats['higher_lows'] += 1
+
+            # All conditions must pass
             if near_high and uptrend and rsi_ok and volume_surge and higher_lows:
-                # Trigger = 0.5% above the 20-day high (buy-stop)
-                trigger = round(today['high20'] * 1.005, 2)
-                atr = round(today['atr'], 2)
-                stop_loss = round(trigger - 2 * today['atr'], 2)
-                target1 = round(trigger + 4 * today['atr'], 2)   # partial profit
-                target2 = round(trigger + 6 * today['atr'], 2)   # final target
+                trigger = round(latest['high20'] * 1.005, 2)
+                atr = round(latest['atr'], 2)
+                stop_loss = round(trigger - 2 * latest['atr'], 2)
+                target1 = round(trigger + 4 * latest['atr'], 2)
+                target2 = round(trigger + 6 * latest['atr'], 2)
 
                 candidates.append({
                     'symbol': symbol.replace('.NS', ''),
@@ -113,14 +108,15 @@ def find_breakout_candidates():
                     'sl': stop_loss,
                     'target1': target1,
                     'target2': target2,
-                    'close': round(today['Close'], 2),
+                    'close': round(latest['Close'], 2),
                     'atr': atr,
-                    'volume_ratio': round(today['Volume'] / today['vol_avg20'], 1)
+                    'volume_ratio': round(latest['Volume'] / latest['vol_avg20'], 1)
                 })
         except Exception as e:
             print(f"Error {symbol}: {e}")
             continue
-    return candidates
+
+    return candidates, stats
 
 # ---------- DAILY REPORT ----------
 def send_daily_report():
@@ -128,24 +124,42 @@ def send_daily_report():
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
 
-    candidates = find_breakout_candidates()
+    candidates, stats = find_breakout_candidates()
 
-    if not candidates:
-        message = f"<b>🔕 No breakout candidates today</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\nCriteria not met. Wait for next session."
-        send_telegram(message)
-        return
+    # Always send the filter statistics
+    message = f"<b>📊 NSE SCAN REPORT</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+    message += f"<b>Stocks Scanned:</b> {stats['total']}\n\n"
+    message += "<b>Filters Passed:</b>\n"
+    message += f"• Near 20d High: {stats['near_high']}\n"
+    message += f"• Uptrend (EMA): {stats['uptrend']}\n"
+    message += f"• RSI 50-70: {stats['rsi_ok']}\n"
+    message += f"• Volume Surge 1.5x: {stats['volume_surge']}\n"
+    message += f"• Higher Lows: {stats['higher_lows']}\n"
+    message += f"━━━━━━━━━━━━━━━\n\n"
 
-    # Build message
-    message = f"<b>🔔 NSE BREAKOUT ALERTS</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
-    for c in candidates[:5]:  # Top 5 only to avoid clutter
-        message += (
-            f"📈 <b>{c['symbol']}</b>\n"
-            f"  <b>Buy-Stop Trigger:</b> ₹{c['trigger']}\n"
-            f"  Stop Loss: ₹{c['sl']} | Target 1: ₹{c['target1']} | Target 2: ₹{c['target2']}\n"
-            f"  Last Close: ₹{c['close']} | ATR: ₹{c['atr']} | Vol: {c['volume_ratio']}x\n"
-            f"━━━━━━━━━━━━━━━━\n"
-        )
-    message += "⚠️ Place <b>buy-stop</b> order above trigger for today. Valid only for this session."
+    if candidates:
+        message += f"<b>🔥 BREAKOUT CANDIDATES: {len(candidates)}</b>\n\n"
+        for c in candidates[:5]:
+            message += (
+                f"📈 <b>{c['symbol']}</b>\n"
+                f"  Trigger: ₹{c['trigger']}\n"
+                f"  SL: ₹{c['sl']} | T1: ₹{c['target1']} | T2: ₹{c['target2']}\n"
+                f"  Close: ₹{c['close']} | ATR: ₹{c['atr']} | Vol: {c['volume_ratio']}x\n"
+                f"━━━━━━━━━━━━━━━━\n"
+            )
+        message += "⚠️ Place buy-stop order above trigger for today."
+    else:
+        message += "🔕 No stocks passed all 5 filters.\n"
+        # Find which filter is blocking the most
+        message += "<b>Bottleneck Analysis:</b>\n"
+        pct_near_high = (stats['near_high']/stats['total'])*100
+        pct_uptrend = (stats['uptrend']/stats['total'])*100
+        pct_rsi = (stats['rsi_ok']/stats['total'])*100
+        pct_vol = (stats['volume_surge']/stats['total'])*100
+        pct_lows = (stats['higher_lows']/stats['total'])*100
+        
+        message += f"Near High: {pct_near_high:.0f}% | Uptrend: {pct_uptrend:.0f}% | RSI: {pct_rsi:.0f}% | Vol: {pct_vol:.0f}% | Higher Lows: {pct_lows:.0f}%"
+
     send_telegram(message)
 
 if __name__ == "__main__":
