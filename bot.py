@@ -10,7 +10,7 @@ import pytz
 TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-# 150 large & mid-cap liquid stocks
+# 150 large & mid-cap liquid NSE stocks
 SYMBOLS = [
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
     "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
@@ -50,14 +50,16 @@ def compute_technicals(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
     close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
+
+    df['ema20'] = close.ewm(span=20, adjust=False).mean()
     df['ema50'] = close.ewm(span=50, adjust=False).mean()
-    # ATR
+
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    # RSI
+
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -65,100 +67,93 @@ def compute_technicals(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss.replace(0, 1)
     df['rsi'] = 100 - (100 / (1 + rs))
+
     df['vol_avg20'] = vol.rolling(20).mean()
     df['high20'] = high.rolling(20).max()
+    df['low20'] = low.rolling(20).min()
     return df
 
-def get_fundamentals(symbol):
+def get_basic_fundamentals(symbol):
+    """Return True if stock passes basic fundamental filters."""
     try:
         info = yf.Ticker(symbol).info
         pe = info.get('trailingPE')
         de = info.get('debtToEquity')
-        return {'pe': pe, 'debt_equity': de}
+        if pe and pe > 30: return False
+        if de and de > 2.0: return False
+        return True
     except:
-        return None
+        return True  # if we can't fetch, still allow
 
-def scan_stocks():
-    picks = []
+def generate_signals():
+    calls = []
+    puts = []
     for sym in SYMBOLS:
         try:
-            # Download 6 months of daily data for indicators
             df = yf.download(sym, period="6mo", interval="1d", progress=False)
-            if len(df) < 100:
-                continue
+            if len(df) < 100: continue
             df = compute_technicals(df)
             latest = df.iloc[-1]
+            prev = df.iloc[-2]
 
-            # --- TECHNICAL CONDITIONS (based on yesterday's close) ---
-            # 1. Price > 50-day EMA (uptrend)
-            if latest['Close'] <= latest['ema50']:
-                continue
-            # 2. RSI between 40-65 (momentum but not overbought)
-            if not (40 < latest['rsi'] < 65):
-                continue
-            # 3. Volume > 1.2x average (buying interest)
-            if latest['Volume'] < 1.2 * latest['vol_avg20']:
-                continue
-            # 4. Within 3% of 20-day high (ready to breakout)
-            if latest['Close'] < latest['high20'] * 0.97:
-                continue
+            # Basic fundamental filter (skip if fails)
+            if not get_basic_fundamentals(sym): continue
 
-            # --- BASIC FUNDAMENTAL FILTER (skip if missing) ---
-            fund = get_fundamentals(sym)
-            if fund:
-                if fund['pe'] and fund['pe'] > 30:
-                    continue
-                if fund['debt_equity'] and fund['debt_equity'] > 2.0:
-                    continue
+            # Common volume condition
+            vol_ok = latest['Volume'] > 1.3 * latest['vol_avg20']
 
-            # All checks passed – calculate trade levels
-            entry = round(latest['Close'], 2)
-            atr = round(latest['atr'], 2)
-            sl = round(entry - 2 * atr, 2)
-            target1 = round(entry + 4 * atr, 2)
-            target2 = round(entry + 6 * atr, 2)
+            # --- CALL criteria ---
+            uptrend = (latest['Close'] > latest['ema50']) and (latest['ema20'] > latest['ema50'])
+            rsi_call_ok = 45 < latest['rsi'] < 65
+            near_high = latest['Close'] >= latest['high20'] * 0.97
+            if uptrend and rsi_call_ok and vol_ok and near_high:
+                entry = round(latest['Close'], 2)
+                atr = latest['atr']
+                target = round(entry + 4 * atr, 2)
+                sl = round(entry - 2 * atr, 2)
+                calls.append((sym.replace('.NS',''), entry, target, sl))
 
-            picks.append({
-                'symbol': sym.replace('.NS',''),
-                'entry': entry,
-                'sl': sl,
-                'target1': target1,
-                'target2': target2,
-                'rsi': round(latest['rsi'], 1),
-                'volume': round(latest['Volume'] / latest['vol_avg20'], 1)
-            })
-        except Exception as e:
+            # --- PUT criteria ---
+            downtrend = (latest['Close'] < latest['ema50']) and (latest['ema20'] < latest['ema50'])
+            rsi_put_ok = 35 < latest['rsi'] < 55
+            near_low = latest['Close'] <= latest['low20'] * 1.03
+            if downtrend and rsi_put_ok and vol_ok and near_low:
+                entry = round(latest['Close'], 2)
+                atr = latest['atr']
+                target = round(entry - 4 * atr, 2)
+                sl = round(entry + 2 * atr, 2)
+                puts.append((sym.replace('.NS',''), entry, target, sl))
+        except:
             continue
 
-    # Sort by volume ratio (strongest first) and take top 5
-    picks.sort(key=lambda x: x['volume'], reverse=True)
-    return picks[:5]
+    # Sort by volume (we already used it as a condition, but still)
+    return calls[:5], puts[:5]
 
-def send_daily_report():
+def send_report():
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
 
-    picks = scan_stocks()
+    calls, puts = generate_signals()
 
-    if picks:
-        msg = f"<b>🔥 DAILY TOP 5 STOCKS</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
-        for i, p in enumerate(picks, 1):
-            msg += (
-                f"<b>{i}. {p['symbol']}</b>\n"
-                f"   💰 Entry: ₹{p['entry']}  |  🛑 SL: ₹{p['sl']}\n"
-                f"   🎯 Target 1: ₹{p['target1']}  |  Target 2: ₹{p['target2']}\n"
-                f"   📊 RSI: {p['rsi']}  |  Vol: {p['volume']}x\n\n"
-            )
-        msg += "━━━━━━━━━━━━━━━\n"
-        msg += "⚠️ <b>Paper trade first.</b> Use strict SL. Only 2% capital per trade."
+    message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+
+    if calls:
+        message += "📈 BUY (CALL) Signals:\n"
+        for name, price, target, sl in calls:
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
     else:
-        msg = f"<b>📭 NO SIGNALS TODAY</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
-        msg += "No stocks passed all filters.\n"
-        msg += "Market is either too weak or too extended.\n"
-        msg += "Cash is a position. Patience is profit."
+        message += "📈 No BUY signals today\n\n"
 
-    send_telegram(msg)
+    if puts:
+        message += "📉 SELL (PUT) Signals:\n"
+        for name, price, target, sl in puts:
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
+    else:
+        message += "📉 No SELL signals today\n\n"
+
+    message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Target based on volatility (ATR)"
+    send_telegram(message)
 
 if __name__ == "__main__":
-    send_daily_report()
+    send_report()
