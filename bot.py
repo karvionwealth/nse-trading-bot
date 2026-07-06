@@ -7,8 +7,8 @@ from datetime import datetime
 import pytz
 
 # ---------- CONFIG ----------
-TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
-TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
+TELEGRAM_TOKEN = os.environ['8799155611:AAHGhz1BdI9q9G8omDKA8Hx6pwfQXjTGBnw']
+TELEGRAM_CHAT_ID = os.environ['8566469289']
 
 # 150 large & mid-cap liquid stocks
 SYMBOLS = [
