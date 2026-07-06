@@ -10,7 +10,6 @@ import pytz
 TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-# 150 large & mid-cap liquid NSE stocks
 SYMBOLS = [
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
     "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
@@ -83,7 +82,7 @@ def get_basic_fundamentals(symbol):
         if de and de > 2.0: return False
         return True
     except:
-        return True  # if we can't fetch, still allow
+        return True
 
 def generate_signals():
     calls = []
@@ -94,18 +93,17 @@ def generate_signals():
             if len(df) < 100: continue
             df = compute_technicals(df)
             latest = df.iloc[-1]
-            prev = df.iloc[-2]
 
-            # Basic fundamental filter (skip if fails)
             if not get_basic_fundamentals(sym): continue
 
-            # Common volume condition
-            vol_ok = latest['Volume'] > 1.3 * latest['vol_avg20']
+            # RELAXED: volume 1.1x (was 1.3)
+            vol_ok = latest['Volume'] > 1.1 * latest['vol_avg20']
 
             # --- CALL criteria ---
             uptrend = (latest['Close'] > latest['ema50']) and (latest['ema20'] > latest['ema50'])
             rsi_call_ok = 45 < latest['rsi'] < 65
-            near_high = latest['Close'] >= latest['high20'] * 0.97
+            # RELAXED: within 5% of 20-day high (was 3%)
+            near_high = latest['Close'] >= latest['high20'] * 0.95
             if uptrend and rsi_call_ok and vol_ok and near_high:
                 entry = round(latest['Close'], 2)
                 atr = latest['atr']
@@ -116,7 +114,8 @@ def generate_signals():
             # --- PUT criteria ---
             downtrend = (latest['Close'] < latest['ema50']) and (latest['ema20'] < latest['ema50'])
             rsi_put_ok = 35 < latest['rsi'] < 55
-            near_low = latest['Close'] <= latest['low20'] * 1.03
+            # RELAXED: within 5% above 20-day low (was 3%)
+            near_low = latest['Close'] <= latest['low20'] * 1.05
             if downtrend and rsi_put_ok and vol_ok and near_low:
                 entry = round(latest['Close'], 2)
                 atr = latest['atr']
@@ -126,7 +125,6 @@ def generate_signals():
         except:
             continue
 
-    # Sort by volume (we already used it as a condition, but still)
     return calls[:5], puts[:5]
 
 def send_report():
@@ -152,7 +150,7 @@ def send_report():
     else:
         message += "📉 No SELL signals today\n\n"
 
-    message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Target based on volatility (ATR)"
+    message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Targets based on volatility (ATR)"
     send_telegram(message)
 
 if __name__ == "__main__":
