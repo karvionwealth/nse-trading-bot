@@ -1,17 +1,16 @@
 import os
-import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime
 import pytz
 
-# ============================================
-# CONFIGURATION
-# ============================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+# ---------- CONFIG ----------
+TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
+TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
+# 150 large & mid-cap liquid stocks
 SYMBOLS = [
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
     "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
@@ -37,144 +36,129 @@ SYMBOLS = [
     "SBICARD.NS","SHREECEM.NS","SIEMENS.NS","SRF.NS","SUNTV.NS",
     "SYNGENE.NS","TATACHEM.NS","TATACOMM.NS","TATACONSUM.NS","TECHM.NS",
     "TIINDIA.NS","TRENT.NS","TVSMOTOR.NS","UPL.NS","YESBANK.NS",
-    "ZEEL.NS","PAYTM.NS","POLICYBZR.NS","NYKAA.NS","DELHIVERY.NS"
+    "ZEEL.NS","ZOMATO.NS","PAYTM.NS","POLICYBZR.NS","NYKAA.NS","DELHIVERY.NS"
 ]
 
-STOP_LOSS_PCT = 0.15  # 15% stop-loss per stock
-TOP_N = 10
-MOMENTUM_MONTHS = 12
-
-def send_telegram(message):
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def get_momentum_score(prices, symbol, current_date):
-    """Calculate 12-month momentum, skipping last month"""
-    end_date = current_date - pd.DateOffset(months=1)
-    start_date = end_date - pd.DateOffset(months=MOMENTUM_MONTHS)
-    
-    end_dates = prices.index[prices.index <= end_date]
-    start_dates = prices.index[prices.index <= start_date]
-    
-    if len(end_dates) == 0 or len(start_dates) == 0:
+def compute_technicals(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+    close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
+    df['ema50'] = close.ewm(span=50, adjust=False).mean()
+    # ATR
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(14).mean()
+    # RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1)
+    df['rsi'] = 100 - (100 / (1 + rs))
+    df['vol_avg20'] = vol.rolling(20).mean()
+    df['high20'] = high.rolling(20).max()
+    return df
+
+def get_fundamentals(symbol):
+    try:
+        info = yf.Ticker(symbol).info
+        pe = info.get('trailingPE')
+        de = info.get('debtToEquity')
+        return {'pe': pe, 'debt_equity': de}
+    except:
         return None
-    
-    try:
-        p_end = float(prices.loc[end_dates[-1], symbol])
-        p_start = float(prices.loc[start_dates[-1], symbol])
-        if pd.notna(p_end) and pd.notna(p_start) and p_start > 0:
-            return (p_end - p_start) / p_start * 100
-    except:
-        pass
-    return None
 
-def check_market_trend():
-    """Check if Nifty is above 200-day MA"""
-    try:
-        nifty = yf.download("^NSEI", period="1y", progress=False)
-        if isinstance(nifty.columns, pd.MultiIndex):
-            nifty.columns = nifty.columns.droplevel(1)
-        close = nifty['Close']
-        ma200 = close.rolling(200).mean()
-        return float(close.iloc[-1]) > float(ma200.iloc[-1])
-    except:
-        return True  # If can't check, stay invested
-
-def generate_monthly_signal():
-    """Main function: Generate top 10 momentum stocks for the month"""
-    ist = pytz.timezone('Asia/Kolkata')
-    now = datetime.now(ist)
-    date_str = now.strftime("%d %B %Y")
-    
-    # Check market trend
-    market_up = check_market_trend()
-    
-    if not market_up:
-        message = f"""<b>⚠️ MARKET BEARISH - STAY IN CASH</b>
-📅 {date_str}
-━━━━━━━━━━━━━━━
-
-Nifty is below its 200-day moving average.
-The bot recommends:
-• <b>SELL all current holdings</b>
-• <b>Stay in CASH</b> until market recovers
-• Wait for next month's signal
-
-<b>Protection Mode Active 🛡️</b>"""
-        send_telegram(message)
-        return
-    
-    # Download price data for momentum calculation
-    end_date = now.strftime('%Y-%m-%d')
-    start_date = (now - timedelta(days=500)).strftime('%Y-%m-%d')
-    
-    momentum_scores = {}
+def scan_stocks():
+    picks = []
     for sym in SYMBOLS:
         try:
-            df = yf.download(sym, start=start_date, end=end_date, progress=False)
-            if len(df) < 250:
+            # Download 6 months of daily data for indicators
+            df = yf.download(sym, period="6mo", interval="1d", progress=False)
+            if len(df) < 100:
                 continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
-            
-            score = get_momentum_score(df['Close'].to_frame() if isinstance(df['Close'], pd.Series) else df, sym.replace('.NS',''), pd.Timestamp.now())
-            if score is not None:
-                # Get current price for the symbol
-                current_price = float(df['Close'].iloc[-1])
-                momentum_scores[sym] = {
-                    'score': score,
-                    'price': current_price
-                }
-        except:
+            df = compute_technicals(df)
+            latest = df.iloc[-1]
+
+            # --- TECHNICAL CONDITIONS (based on yesterday's close) ---
+            # 1. Price > 50-day EMA (uptrend)
+            if latest['Close'] <= latest['ema50']:
+                continue
+            # 2. RSI between 40-65 (momentum but not overbought)
+            if not (40 < latest['rsi'] < 65):
+                continue
+            # 3. Volume > 1.2x average (buying interest)
+            if latest['Volume'] < 1.2 * latest['vol_avg20']:
+                continue
+            # 4. Within 3% of 20-day high (ready to breakout)
+            if latest['Close'] < latest['high20'] * 0.97:
+                continue
+
+            # --- BASIC FUNDAMENTAL FILTER (skip if missing) ---
+            fund = get_fundamentals(sym)
+            if fund:
+                if fund['pe'] and fund['pe'] > 30:
+                    continue
+                if fund['debt_equity'] and fund['debt_equity'] > 2.0:
+                    continue
+
+            # All checks passed – calculate trade levels
+            entry = round(latest['Close'], 2)
+            atr = round(latest['atr'], 2)
+            sl = round(entry - 2 * atr, 2)
+            target1 = round(entry + 4 * atr, 2)
+            target2 = round(entry + 6 * atr, 2)
+
+            picks.append({
+                'symbol': sym.replace('.NS',''),
+                'entry': entry,
+                'sl': sl,
+                'target1': target1,
+                'target2': target2,
+                'rsi': round(latest['rsi'], 1),
+                'volume': round(latest['Volume'] / latest['vol_avg20'], 1)
+            })
+        except Exception as e:
             continue
-    
-    if len(momentum_scores) < TOP_N:
-        send_telegram(f"⚠️ Insufficient data. Only {len(momentum_scores)} stocks available.")
-        return
-    
-    # Sort and pick top N
-    sorted_stocks = sorted(momentum_scores.items(), key=lambda x: x[1]['score'], reverse=True)
-    top_picks = sorted_stocks[:TOP_N]
-    
-    # Build message
-    message = f"""<b>🔔 MONTHLY MOMENTUM PICKS</b>
-📅 {date_str}
-━━━━━━━━━━━━━━━
-Market Status: 🟢 <b>BULLISH</b> (Nifty > 200-day MA)
 
-<b>BUY THESE 10 STOCKS (Equal Weight):</b>
+    # Sort by volume ratio (strongest first) and take top 5
+    picks.sort(key=lambda x: x['volume'], reverse=True)
+    return picks[:5]
 
-"""
-    for i, (sym, data) in enumerate(top_picks, 1):
-        name = sym.replace('.NS', '')
-        price = data['price']
-        momentum = data['score']
-        stop_loss = round(price * (1 - STOP_LOSS_PCT), 2)
-        
-        message += f"""<b>{i}. {name}</b>
-   Price: ₹{price:.2f}
-   12M Momentum: {momentum:.1f}%
-   🛑 Stop-Loss: ₹{stop_loss}
-   
-"""
-    
-    message += f"""━━━━━━━━━━━━━━━
-<b>📋 INSTRUCTIONS:</b>
-• Buy all 10 stocks TODAY at market price
-• Equal amount in each (e.g., ₹10,000 each for ₹1L portfolio)
-• Set Stop-Loss at 15% below entry for each stock
-• Hold until next month's signal (first week of next month)
-• If any stock hits stop-loss intra-month, SELL immediately
+def send_daily_report():
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    date_str = now.strftime("%d %B %Y, %I:%M %p")
 
-⚠️ <b>Max Risk Per Stock: 15%</b>
-🛡️ <b>Portfolio Emergency Brake: If total portfolio down 20%, sell everything</b>
+    picks = scan_stocks()
 
-Next review: First week of next month"""
-    
-    send_telegram(message)
+    if picks:
+        msg = f"<b>🔥 DAILY TOP 5 STOCKS</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+        for i, p in enumerate(picks, 1):
+            msg += (
+                f"<b>{i}. {p['symbol']}</b>\n"
+                f"   💰 Entry: ₹{p['entry']}  |  🛑 SL: ₹{p['sl']}\n"
+                f"   🎯 Target 1: ₹{p['target1']}  |  Target 2: ₹{p['target2']}\n"
+                f"   📊 RSI: {p['rsi']}  |  Vol: {p['volume']}x\n\n"
+            )
+        msg += "━━━━━━━━━━━━━━━\n"
+        msg += "⚠️ <b>Paper trade first.</b> Use strict SL. Only 2% capital per trade."
+    else:
+        msg = f"<b>📭 NO SIGNALS TODAY</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+        msg += "No stocks passed all filters.\n"
+        msg += "Market is either too weak or too extended.\n"
+        msg += "Cash is a position. Patience is profit."
+
+    send_telegram(msg)
 
 if __name__ == "__main__":
-    generate_monthly_signal()
+    send_daily_report()
