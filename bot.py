@@ -6,7 +6,6 @@ import requests
 from datetime import datetime
 import pytz
 
-# ---------- CONFIG ----------
 TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
@@ -49,16 +48,13 @@ def compute_technicals(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
     close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
-
     df['ema20'] = close.ewm(span=20, adjust=False).mean()
     df['ema50'] = close.ewm(span=50, adjust=False).mean()
-
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -66,14 +62,12 @@ def compute_technicals(df):
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss.replace(0, 1)
     df['rsi'] = 100 - (100 / (1 + rs))
-
     df['vol_avg20'] = vol.rolling(20).mean()
     df['high20'] = high.rolling(20).max()
     df['low20'] = low.rolling(20).min()
     return df
 
 def get_basic_fundamentals(symbol):
-    """Return True if stock passes basic fundamental filters."""
     try:
         info = yf.Ticker(symbol).info
         pe = info.get('trailingPE')
@@ -85,73 +79,55 @@ def get_basic_fundamentals(symbol):
         return True
 
 def generate_signals():
-    calls = []
-    puts = []
+    calls, puts = [], []
     for sym in SYMBOLS:
         try:
             df = yf.download(sym, period="6mo", interval="1d", progress=False)
             if len(df) < 100: continue
             df = compute_technicals(df)
             latest = df.iloc[-1]
-
             if not get_basic_fundamentals(sym): continue
 
-            # RELAXED: volume 1.1x (was 1.3)
-            vol_ok = latest['Volume'] > 1.1 * latest['vol_avg20']
-
-            # --- CALL criteria ---
+            # STRICT: volume 1.3x, near high 3%
+            vol_ok = latest['Volume'] > 1.3 * latest['vol_avg20']
+            # CALL
             uptrend = (latest['Close'] > latest['ema50']) and (latest['ema20'] > latest['ema50'])
             rsi_call_ok = 45 < latest['rsi'] < 65
-            # RELAXED: within 5% of 20-day high (was 3%)
-            near_high = latest['Close'] >= latest['high20'] * 0.95
+            near_high = latest['Close'] >= latest['high20'] * 0.97
             if uptrend and rsi_call_ok and vol_ok and near_high:
                 entry = round(latest['Close'], 2)
                 atr = latest['atr']
-                target = round(entry + 4 * atr, 2)
-                sl = round(entry - 2 * atr, 2)
-                calls.append((sym.replace('.NS',''), entry, target, sl))
+                calls.append((sym.replace('.NS',''), entry, round(entry + 4*atr,2), round(entry - 2*atr,2)))
 
-            # --- PUT criteria ---
+            # PUT
             downtrend = (latest['Close'] < latest['ema50']) and (latest['ema20'] < latest['ema50'])
             rsi_put_ok = 35 < latest['rsi'] < 55
-            # RELAXED: within 5% above 20-day low (was 3%)
-            near_low = latest['Close'] <= latest['low20'] * 1.05
+            near_low = latest['Close'] <= latest['low20'] * 1.03
             if downtrend and rsi_put_ok and vol_ok and near_low:
                 entry = round(latest['Close'], 2)
                 atr = latest['atr']
-                target = round(entry - 4 * atr, 2)
-                sl = round(entry + 2 * atr, 2)
-                puts.append((sym.replace('.NS',''), entry, target, sl))
-        except:
-            continue
-
+                puts.append((sym.replace('.NS',''), entry, round(entry - 4*atr,2), round(entry + 2*atr,2)))
+        except: continue
     return calls[:5], puts[:5]
 
 def send_report():
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
-
     calls, puts = generate_signals()
-
-    message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
-
+    msg = f"🧠 <b>QBOT (Quality Signals)</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
     if calls:
-        message += "📈 BUY (CALL) Signals:\n"
+        msg += "📈 BUY (CALL) Signals:\n"
         for name, price, target, sl in calls:
-            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
-    else:
-        message += "📈 No BUY signals today\n\n"
-
+            msg += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
+    else: msg += "📈 No BUY signals today\n\n"
     if puts:
-        message += "📉 SELL (PUT) Signals:\n"
+        msg += "📉 SELL (PUT) Signals:\n"
         for name, price, target, sl in puts:
-            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
-    else:
-        message += "📉 No SELL signals today\n\n"
-
-    message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Targets based on volatility (ATR)"
-    send_telegram(message)
+            msg += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
+    else: msg += "📉 No SELL signals today\n\n"
+    msg += "━━━━━━━━━━━━━━━\n⚠️ Strict filters – high conviction only"
+    send_telegram(msg)
 
 if __name__ == "__main__":
     send_report()
