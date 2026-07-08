@@ -1,133 +1,86 @@
 ]import os
 import yfinance as yf
-import pandas as pd
-import numpy as np
 import requests
 from datetime import datetime
 import pytz
 
-TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
-TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
+# Read from GitHub Secrets (DO NOT hardcode)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-SYMBOLS = [
-    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
-    "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
-    "BAJFINANCE.NS","MARUTI.NS","TITAN.NS","SUNPHARMA.NS","NTPC.NS","ONGC.NS",
-    "POWERGRID.NS","WIPRO.NS","HCLTECH.NS","ULTRACEMCO.NS","JSWSTEEL.NS",
-    "TATASTEEL.NS","ADANIPORTS.NS","ADANIENT.NS","DIVISLAB.NS","DRREDDY.NS",
-    "CIPLA.NS","BRITANNIA.NS","HDFCLIFE.NS","SBILIFE.NS","EICHERMOT.NS","M&M.NS",
-    "HINDZINC.NS","VEDL.NS","DLF.NS","INDIGO.NS","HAVELLS.NS","VOLTAS.NS",
-    "DABUR.NS","PIDILITIND.NS","BERGEPAINT.NS","LUPIN.NS","AUROPHARMA.NS",
-    "BIOCON.NS","TORNTPHARM.NS","ALKEM.NS","APOLLOHOSP.NS","ASIANPAINT.NS",
-    "BAJAJFINSV.NS","BAJAJHLDNG.NS","BALKRISIND.NS","BANDHANBNK.NS","BEL.NS",
-    "BHARATFORG.NS","BOSCHLTD.NS","BPCL.NS","CANBK.NS","CHOLAFIN.NS","COALINDIA.NS",
-    "COLPAL.NS","CONCOR.NS","CUMMINSIND.NS","DEEPAKNTR.NS","ESCORTS.NS",
-    "GAIL.NS","GODREJCP.NS","GODREJPROP.NS","GRASIM.NS","HAL.NS",
-    "HEROMOTOCO.NS","HINDALCO.NS","HINDPETRO.NS","ICICIPRULI.NS",
-    "IDFCFIRSTB.NS","INDUSINDBK.NS","INDUSTOWER.NS","IOC.NS","IRCTC.NS",
-    "JINDALSTEL.NS","JUBLFOOD.NS","LICHSGFIN.NS","LUPIN.NS","M&MFIN.NS",
-    "MARICO.NS","MFSL.NS","MOTHERSON.NS","MPHASIS.NS","MRF.NS","MUTHOOTFIN.NS",
-    "NAUKRI.NS","NAVINFLUOR.NS","NESTLEIND.NS","OBEROIRLTY.NS","OFSS.NS",
-    "PAGEIND.NS","PERSISTENT.NS","PETRONET.NS","PFC.NS",
-    "PIIND.NS","PNB.NS","POLYCAB.NS","POONAWALLA.NS",
-    "PRESTIGE.NS","RAMCOCEM.NS","RBLBANK.NS","RECLTD.NS","SAIL.NS",
-    "SBICARD.NS","SHREECEM.NS","SIEMENS.NS","SRF.NS","SUNTV.NS",
-    "SYNGENE.NS","TATACHEM.NS","TATACOMM.NS","TATACONSUM.NS","TECHM.NS",
-    "TIINDIA.NS","TRENT.NS","TVSMOTOR.NS","UPL.NS","YESBANK.NS",
-    "ZEEL.NS","ZOMATO.NS","PAYTM.NS","POLICYBZR.NS","NYKAA.NS","DELHIVERY.NS"
-]
-
-def send_telegram(msg):
+def send_telegram(message):
+    """Send message to Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+        return True
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Error: {e}")
+        return False
 
-def compute_technicals(df):
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
-    close = df['Close']; high = df['High']; low = df['Low']; vol = df['Volume']
-    df['ema20'] = close.ewm(span=20, adjust=False).mean()
-    df['ema50'] = close.ewm(span=50, adjust=False).mean()
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1)
-    df['rsi'] = 100 - (100 / (1 + rs))
-    df['vol_avg20'] = vol.rolling(20).mean()
-    df['high20'] = high.rolling(20).max()
-    df['low20'] = low.rolling(20).min()
-    return df
-
-def get_basic_fundamentals(symbol):
-    try:
-        info = yf.Ticker(symbol).info
-        pe = info.get('trailingPE')
-        de = info.get('debtToEquity')
-        if pe and pe > 30: return False
-        if de and de > 2.0: return False
-        return True
-    except:
-        return True
-
-def generate_signals():
-    calls, puts = [], []
-    for sym in SYMBOLS:
+def analyze_stocks():
+    """Analyze NSE stocks and generate signals"""
+    stocks = [
+        "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+        "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS"
+    ]
+    
+    calls = []
+    puts = []
+    
+    for stock in stocks[:7]:  # Check top 7 stocks
         try:
-            df = yf.download(sym, period="6mo", interval="1d", progress=False)
-            if len(df) < 100: continue
-            df = compute_technicals(df)
-            latest = df.iloc[-1]
-            if not get_basic_fundamentals(sym): continue
+            ticker = yf.Ticker(stock)
+            hist = ticker.history(period="1mo")
+            
+            if len(hist) < 20:
+                continue
+            
+            df = hist.copy()
+            df['SMA20'] = df['Close'].rolling(window=20).mean()
+            last_price = df['Close'].iloc[-1]
+            last_sma20 = df['SMA20'].iloc[-1]
+            
+            # Simple logic
+            if last_price > last_sma20 * 1.01:
+                target = round(last_price * 1.05, 2)
+                stoploss = round(last_price * 0.97, 2)
+                calls.append((stock.replace('.NS', ''), last_price, target, stoploss))
+            elif last_price < last_sma20 * 0.99:
+                target = round(last_price * 0.95, 2)
+                stoploss = round(last_price * 1.03, 2)
+                puts.append((stock.replace('.NS', ''), last_price, target, stoploss))
+        except:
+            continue
+    
+    return calls, puts
 
-            # STRICT: volume 1.3x, near high 3%
-            vol_ok = latest['Volume'] > 1.3 * latest['vol_avg20']
-            # CALL
-            uptrend = (latest['Close'] > latest['ema50']) and (latest['ema20'] > latest['ema50'])
-            rsi_call_ok = 45 < latest['rsi'] < 65
-            near_high = latest['Close'] >= latest['high20'] * 0.97
-            if uptrend and rsi_call_ok and vol_ok and near_high:
-                entry = round(latest['Close'], 2)
-                atr = latest['atr']
-                calls.append((sym.replace('.NS',''), entry, round(entry + 4*atr,2), round(entry - 2*atr,2)))
-
-            # PUT
-            downtrend = (latest['Close'] < latest['ema50']) and (latest['ema20'] < latest['ema50'])
-            rsi_put_ok = 35 < latest['rsi'] < 55
-            near_low = latest['Close'] <= latest['low20'] * 1.03
-            if downtrend and rsi_put_ok and vol_ok and near_low:
-                entry = round(latest['Close'], 2)
-                atr = latest['atr']
-                puts.append((sym.replace('.NS',''), entry, round(entry - 4*atr,2), round(entry + 2*atr,2)))
-        except: continue
-    return calls[:5], puts[:5]
-
-def send_report():
+def send_daily_report():
+    """Generate and send trading report"""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
-    calls, puts = generate_signals()
-    msg = f"🧠 <b>QBOT (Quality Signals)</b>\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+    
+    calls, puts = analyze_stocks()
+    
+    message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
+    
     if calls:
-        msg += "📈 BUY (CALL) Signals:\n"
+        message += f"📈 BUY (CALL) Signals:\n"
         for name, price, target, sl in calls:
-            msg += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
-    else: msg += "📈 No BUY signals today\n\n"
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
+    else:
+        message += f"📈 No BUY signals today\n\n"
+    
     if puts:
-        msg += "📉 SELL (PUT) Signals:\n"
+        message += f"📉 SELL (PUT) Signals:\n"
         for name, price, target, sl in puts:
-            msg += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
-    else: msg += "📉 No SELL signals today\n\n"
-    msg += "━━━━━━━━━━━━━━━\n⚠️ Strict filters – high conviction only"
-    send_telegram(msg)
+            message += f"• {name}: ₹{price}\n  → Target: ₹{target} | SL: ₹{sl}\n\n"
+    else:
+        message += f"📉 No SELL signals today\n\n"
+    
+    message += f"━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Target: 5%"
+    send_telegram(message)
 
 if __name__ == "__main__":
-    send_report()
+    send_daily_report()
