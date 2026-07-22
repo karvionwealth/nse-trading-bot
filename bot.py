@@ -183,6 +183,14 @@ def generate_signals():
 
 def send_report():
     """Generate and send the daily report to Telegram."""
+    
+    # ============================================================
+    # 🔔 CRITICAL TEST: Sends instant message to verify Telegram
+    # If you receive this, your GitHub Secrets are set correctly.
+    # ============================================================
+    send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
+    # ============================================================
+
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
