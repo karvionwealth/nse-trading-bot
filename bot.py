@@ -56,17 +56,73 @@ def send_telegram(msg):
         print("✅ Telegram message sent successfully!")
     except Exception as e:
         print(f"❌ Telegram error: {e}")
-        # Don't crash the script - just print the error
 
-def flatten_columns(df):
-    """Ensure columns are simple strings, not MultiIndex."""
+def normalize_columns(df):
+    """
+    Ensures 'Open', 'High', 'Low', 'Close', 'Volume' exist.
+    Handles MultiIndex, missing columns, and renamed columns by position or name.
+    """
+    # 1. Flatten MultiIndex if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ['_'.join(col).strip('_') for col in df.columns.values]
+    
+    # 2. Strip spaces from column names
+    df.columns = [str(col).strip() for col in df.columns]
+    
+    # 3. If there are exactly 5 or 6 columns, map them by standard position (OHLCV / OHLC A V)
+    # Standard yfinance with auto_adjust=True returns: Open, High, Low, Close, Volume
+    # With auto_adjust=False sometimes returns: Open, High, Low, Close, Adj Close, Volume
+    if len(df.columns) >= 4:
+        # Assign by position if standard names are missing
+        if 'Close' not in df.columns:
+            df['Close'] = df.iloc[:, 3]  # 4th column (0-indexed)
+            print("⚠️ Mapped position 3 -> 'Close'")
+        if 'High' not in df.columns and len(df.columns) >= 2:
+            df['High'] = df.iloc[:, 1]   # 2nd column
+            print("⚠️ Mapped position 1 -> 'High'")
+        if 'Low' not in df.columns and len(df.columns) >= 3:
+            df['Low'] = df.iloc[:, 2]    # 3rd column
+            print("⚠️ Mapped position 2 -> 'Low'")
+        if 'Volume' not in df.columns and len(df.columns) >= 5:
+            # Try to find the volume column (usually last, or column 4)
+            # Check if column index 4 exists and has large numbers
+            if len(df.columns) > 4:
+                df['Volume'] = df.iloc[:, 4]
+                print("⚠️ Mapped position 4 -> 'Volume'")
+            elif len(df.columns) == 5:
+                df['Volume'] = df.iloc[:, 4]
+            elif len(df.columns) == 6:
+                # Usually index 4 is Adj Close, index 5 is Volume
+                df['Volume'] = df.iloc[:, 5]
+                print("⚠️ Mapped position 5 -> 'Volume'")
+
+    # 4. Case-insensitive search for any remaining missing columns
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'close' in col_lower and 'Close' not in df.columns:
+            df['Close'] = df[col]
+            print(f"⚠️ Found 'Close' via case-insensitive match: '{col}'")
+        if 'high' in col_lower and 'High' not in df.columns:
+            df['High'] = df[col]
+        if 'low' in col_lower and 'Low' not in df.columns:
+            df['Low'] = df[col]
+        if 'volume' in col_lower and 'Volume' not in df.columns:
+            df['Volume'] = df[col]
+            print(f"⚠️ Found 'Volume' via case-insensitive match: '{col}'")
+
+    # 5. Ensure all required columns are numeric (convert if needed)
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
     return df
 
 def compute_technicals(df):
     """Calculate all technical indicators used by the bot."""
-    df = flatten_columns(df)
+    # Ensure standard columns exist
+    df = normalize_columns(df)
+    
+    # Extract columns safely
     close = df['Close']
     high = df['High']
     low = df['Low']
@@ -108,7 +164,7 @@ def get_basic_fundamentals(symbol):
             return False
         return True
     except:
-        return True  # Allow if data not available
+        return True
 
 def generate_signals():
     """
@@ -120,12 +176,17 @@ def generate_signals():
     
     for sym in SYMBOLS:
         try:
-            # Download 6 months of daily data
-            df = yf.download(sym, period="6mo", interval="1d", progress=False)
+            # ✅ Use auto_adjust=True to get clean adjusted columns
+            df = yf.download(sym, period="6mo", interval="1d", progress=False, auto_adjust=True)
+            
             if df.empty or len(df) < 100:
                 print(f"⏭️ Skipping {sym}: Insufficient data")
                 continue
             
+            # Normalize columns to ensure 'Close', 'High', 'Low', 'Volume' exist
+            df = normalize_columns(df)
+            
+            # Calculate technicals
             df = compute_technicals(df)
             latest = df.iloc[-1]
 
@@ -154,7 +215,7 @@ def generate_signals():
             if uptrend and rsi_call_ok and vol_ok and near_high:
                 entry = round(close_val, 2)
                 atr = round(atr_val, 2)
-                # ✅ UPDATED: 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
+                # ✅ 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
                 target = round(entry + 2 * atr, 2)
                 sl = round(entry - 1 * atr, 2)
                 calls.append((sym.replace('.NS',''), entry, target, sl))
@@ -167,7 +228,7 @@ def generate_signals():
             if downtrend and rsi_put_ok and vol_ok and near_low:
                 entry = round(close_val, 2)
                 atr = round(atr_val, 2)
-                # ✅ UPDATED: 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
+                # ✅ 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
                 target = round(entry - 2 * atr, 2)
                 sl = round(entry + 1 * atr, 2)
                 puts.append((sym.replace('.NS',''), entry, target, sl))
@@ -184,12 +245,8 @@ def generate_signals():
 def send_report():
     """Generate and send the daily report to Telegram."""
     
-    # ============================================================
-    # 🔔 CRITICAL TEST: Sends instant message to verify Telegram
-    # If you receive this, your GitHub Secrets are set correctly.
-    # ============================================================
+    # 🔔 INSTANT TEST MESSAGE – confirms Telegram connectivity
     send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
-    # ============================================================
 
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
