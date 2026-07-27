@@ -2,21 +2,35 @@ name: NSE Trading Bot
 
 on:
   schedule:
-    - cron: '45 3 * * 1-5'   # 9:15 AM IST, Mon-Fri
-  workflow_dispatch:
+    - cron: '45 3 * * 1-5'   # 9:15 AM IST, Monday to Friday
+  workflow_dispatch:          # Allows manual trigger from GitHub UI
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install dependencies
-        run: pip install pandas yfinance numpy requests pytz
+        run: |
+          pip install pandas yfinance numpy requests pytz
+
       - name: Run Trading Bot
         env:
+          # Your bot token (required)
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          
+          # OPTION 1: Single recipient (fallback - keeps your old setup working)
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          
+          # OPTION 2: Multiple recipients (NEW - comma separated, e.g., "123,456")
+          # If this is set, the bot will IGNORE the single TELEGRAM_CHAT_ID above
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python bot.py
