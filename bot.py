@@ -8,7 +8,18 @@ import pytz
 
 # ---------- CONFIG ----------
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+# --- NEW: Support for multiple chat IDs ---
+# Read a comma-separated list from a NEW environment variable
+CHAT_IDS_MULTI = os.environ.get('TELEGRAM_CHAT_IDS')
+
+# Backward compatibility: if the new variable is empty, fall back to the old single ID
+if CHAT_IDS_MULTI:
+    CHAT_IDS = [cid.strip() for cid in CHAT_IDS_MULTI.split(',') if cid.strip()]
+else:
+    single_id = os.environ.get('TELEGRAM_CHAT_ID')
+    CHAT_IDS = [single_id] if single_id else []
+# ------------------------------------------
 
 # 128 liquid NSE stocks (ZOMATO.NS REMOVED - delisted/renamed)
 SYMBOLS = [
@@ -40,22 +51,25 @@ SYMBOLS = [
 ]
 
 def send_telegram(msg):
-    """Send message to Telegram with robust error handling."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ ERROR: TELEGRAM_TOKEN or TELEGRAM_CHAT_ID not set in environment.")
+    """Send message to multiple Telegram recipients."""
+    if not TELEGRAM_TOKEN or not CHAT_IDS:
+        print("❌ ERROR: TELEGRAM_TOKEN or CHAT_IDS not set in environment.")
         return
     
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        response = requests.post(
-            url, 
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, 
-            timeout=10
-        )
-        response.raise_for_status()
-        print("✅ Telegram message sent successfully!")
-    except Exception as e:
-        print(f"❌ Telegram error: {e}")
+    for chat_id in CHAT_IDS:
+        if not chat_id:  # Skip empty IDs
+            continue
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        try:
+            response = requests.post(
+                url, 
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, 
+                timeout=10
+            )
+            response.raise_for_status()
+            print(f"✅ Telegram message sent successfully to {chat_id}!")
+        except Exception as e:
+            print(f"❌ Telegram error for {chat_id}: {e}")
 
 def normalize_columns(df):
     """
@@ -70,29 +84,23 @@ def normalize_columns(df):
     df.columns = [str(col).strip() for col in df.columns]
     
     # 3. If there are exactly 5 or 6 columns, map them by standard position (OHLCV / OHLC A V)
-    # Standard yfinance with auto_adjust=True returns: Open, High, Low, Close, Volume
-    # With auto_adjust=False sometimes returns: Open, High, Low, Close, Adj Close, Volume
     if len(df.columns) >= 4:
-        # Assign by position if standard names are missing
         if 'Close' not in df.columns:
-            df['Close'] = df.iloc[:, 3]  # 4th column (0-indexed)
+            df['Close'] = df.iloc[:, 3]
             print("⚠️ Mapped position 3 -> 'Close'")
         if 'High' not in df.columns and len(df.columns) >= 2:
-            df['High'] = df.iloc[:, 1]   # 2nd column
+            df['High'] = df.iloc[:, 1]
             print("⚠️ Mapped position 1 -> 'High'")
         if 'Low' not in df.columns and len(df.columns) >= 3:
-            df['Low'] = df.iloc[:, 2]    # 3rd column
+            df['Low'] = df.iloc[:, 2]
             print("⚠️ Mapped position 2 -> 'Low'")
         if 'Volume' not in df.columns and len(df.columns) >= 5:
-            # Try to find the volume column (usually last, or column 4)
-            # Check if column index 4 exists and has large numbers
             if len(df.columns) > 4:
                 df['Volume'] = df.iloc[:, 4]
                 print("⚠️ Mapped position 4 -> 'Volume'")
             elif len(df.columns) == 5:
                 df['Volume'] = df.iloc[:, 4]
             elif len(df.columns) == 6:
-                # Usually index 4 is Adj Close, index 5 is Volume
                 df['Volume'] = df.iloc[:, 5]
                 print("⚠️ Mapped position 5 -> 'Volume'")
 
@@ -110,7 +118,7 @@ def normalize_columns(df):
             df['Volume'] = df[col]
             print(f"⚠️ Found 'Volume' via case-insensitive match: '{col}'")
 
-    # 5. Ensure all required columns are numeric (convert if needed)
+    # 5. Ensure all required columns are numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -119,10 +127,8 @@ def normalize_columns(df):
 
 def compute_technicals(df):
     """Calculate all technical indicators used by the bot."""
-    # Ensure standard columns exist
     df = normalize_columns(df)
     
-    # Extract columns safely
     close = df['Close']
     high = df['High']
     low = df['Low']
@@ -176,17 +182,13 @@ def generate_signals():
     
     for sym in SYMBOLS:
         try:
-            # ✅ Use auto_adjust=True to get clean adjusted columns
             df = yf.download(sym, period="6mo", interval="1d", progress=False, auto_adjust=True)
             
             if df.empty or len(df) < 100:
                 print(f"⏭️ Skipping {sym}: Insufficient data")
                 continue
             
-            # Normalize columns to ensure 'Close', 'High', 'Low', 'Volume' exist
             df = normalize_columns(df)
-            
-            # Calculate technicals
             df = compute_technicals(df)
             latest = df.iloc[-1]
 
