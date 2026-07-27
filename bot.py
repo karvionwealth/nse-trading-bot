@@ -245,6 +245,13 @@ def generate_signals():
     return calls[:5], puts[:5]
 
 def send_report():
+    # --- DEBUG: Force print the Chat IDs the bot is using ---
+    print(f"🔍 DEBUG: CHAT_IDS list = {CHAT_IDS}")
+    # ------------------------------------------------
+    
+    send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
+    # ... rest of the code
+def send_report():
     """Generate and send the daily report to Telegram."""
     
     # 🔔 INSTANT TEST MESSAGE – confirms Telegram connectivity
