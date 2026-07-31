@@ -1,11 +1,24 @@
+import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime
 import pytz
 
 # ---------- CONFIG ----------
-# ✅ NO TELEGRAM CREDENTIALS NEEDED. This is a console-only test.
+# Reads from GitHub Secrets (TELEGRAM_TOKEN, TELEGRAM_CHAT_IDS)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+
+# --- Support for multiple chat IDs ---
+CHAT_IDS_MULTI = os.environ.get('TELEGRAM_CHAT_IDS')
+
+if CHAT_IDS_MULTI:
+    CHAT_IDS = [cid.strip() for cid in CHAT_IDS_MULTI.split(',') if cid.strip()]
+else:
+    single_id = os.environ.get('TELEGRAM_CHAT_ID')
+    CHAT_IDS = [single_id] if single_id else []
+# ------------------------------------------
 
 # 128 liquid NSE stocks
 SYMBOLS = [
@@ -35,13 +48,26 @@ SYMBOLS = [
     "PAYTM.NS","POLICYBZR.NS","NYKAA.NS","DELHIVERY.NS"
 ]
 
-# ============================================================
-# ✅ CONSOLE-ONLY: Prints signals instead of sending to Telegram
-# ============================================================
-def send_console(msg):
-    """Print message to console instead of sending to Telegram."""
-    print(msg)
-    print("-" * 50)
+def send_telegram(msg):
+    """Send message to multiple Telegram recipients."""
+    if not TELEGRAM_TOKEN or not CHAT_IDS:
+        print("❌ ERROR: TELEGRAM_TOKEN or CHAT_IDS not set in environment.")
+        return
+    
+    for chat_id in CHAT_IDS:
+        if not chat_id:
+            continue
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        try:
+            response = requests.post(
+                url, 
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, 
+                timeout=10
+            )
+            response.raise_for_status()
+            print(f"✅ Telegram message sent successfully to {chat_id}!")
+        except Exception as e:
+            print(f"❌ Telegram error for {chat_id}: {e}")
 
 def normalize_columns(df):
     """Ensures 'Open', 'High', 'Low', 'Close', 'Volume' exist."""
@@ -177,19 +203,16 @@ def generate_signals():
     return calls[:5], puts[:5]
 
 def send_report():
-    """Generate and print the report to console."""
+    """Generate and send the report to Telegram."""
+    send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
+
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
 
-    print("=" * 60)
-    print(f"🤖 NSE TRADING SIGNALS (CONSOLE TEST)")
-    print(f"📅 {date_str}")
-    print("=" * 60)
-
-    print("🔄 Generating signals... (Scanning 128 stocks)\n")
+    print(f"🔄 Generating signals for {date_str}...")
     calls, puts = generate_signals()
-    print(f"✅ Generated {len(calls)} CALLs and {len(puts)} PUTs\n")
+    print(f"✅ Generated {len(calls)} CALLs and {len(puts)} PUTs")
 
     message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
 
@@ -209,9 +232,10 @@ def send_report():
 
     message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Targets based on 2x ATR (Proven Profitable)"
     
-    # ✅ Print to console instead of sending to Telegram
-    print(message)
-    print("\n✅ Report complete!")
+    print("📤 Sending to Telegram...")
+    send_telegram(message)
+    print("✅ Report complete!")
 
 if __name__ == "__main__":
+    print("🚀 Starting NSE Trading Bot...")
     send_report()
