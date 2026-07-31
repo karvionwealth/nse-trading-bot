@@ -1,27 +1,13 @@
-import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import requests
 from datetime import datetime
 import pytz
 
 # ---------- CONFIG ----------
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+# ✅ NO TELEGRAM CREDENTIALS NEEDED. This is a console-only test.
 
-# --- NEW: Support for multiple chat IDs ---
-# Read a comma-separated list from a NEW environment variable
-CHAT_IDS_MULTI = os.environ.get('TELEGRAM_CHAT_IDS')
-
-# Backward compatibility: if the new variable is empty, fall back to the old single ID
-if CHAT_IDS_MULTI:
-    CHAT_IDS = [cid.strip() for cid in CHAT_IDS_MULTI.split(',') if cid.strip()]
-else:
-    single_id = os.environ.get('TELEGRAM_CHAT_ID')
-    CHAT_IDS = [single_id] if single_id else []
-# ------------------------------------------
-
-# 128 liquid NSE stocks (ZOMATO.NS REMOVED - delisted/renamed)
+# 128 liquid NSE stocks
 SYMBOLS = [
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
     "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","AXISBANK.NS",
@@ -46,79 +32,44 @@ SYMBOLS = [
     "SAIL.NS","SBICARD.NS","SHREECEM.NS","SIEMENS.NS","SRF.NS","SUNTV.NS",
     "SYNGENE.NS","TATACHEM.NS","TATACOMM.NS","TATACONSUM.NS","TECHM.NS",
     "TIINDIA.NS","TRENT.NS","TVSMOTOR.NS","UPL.NS","YESBANK.NS","ZEEL.NS",
-    # "ZOMATO.NS" REMOVED - Delisted/renamed
     "PAYTM.NS","POLICYBZR.NS","NYKAA.NS","DELHIVERY.NS"
 ]
 
-def send_telegram(msg):
-    """Send message to multiple Telegram recipients."""
-    if not TELEGRAM_TOKEN or not CHAT_IDS:
-        print("❌ ERROR: TELEGRAM_TOKEN or CHAT_IDS not set in environment.")
-        return
-    
-    for chat_id in CHAT_IDS:
-        if not chat_id:  # Skip empty IDs
-            continue
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        try:
-            response = requests.post(
-                url, 
-                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, 
-                timeout=10
-            )
-            response.raise_for_status()
-            print(f"✅ Telegram message sent successfully to {chat_id}!")
-        except Exception as e:
-            print(f"❌ Telegram error for {chat_id}: {e}")
+# ============================================================
+# ✅ CONSOLE-ONLY: Prints signals instead of sending to Telegram
+# ============================================================
+def send_console(msg):
+    """Print message to console instead of sending to Telegram."""
+    print(msg)
+    print("-" * 50)
 
 def normalize_columns(df):
-    """
-    Ensures 'Open', 'High', 'Low', 'Close', 'Volume' exist.
-    Handles MultiIndex, missing columns, and renamed columns by position or name.
-    """
-    # 1. Flatten MultiIndex if present
+    """Ensures 'Open', 'High', 'Low', 'Close', 'Volume' exist."""
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ['_'.join(col).strip('_') for col in df.columns.values]
     
-    # 2. Strip spaces from column names
     df.columns = [str(col).strip() for col in df.columns]
     
-    # 3. If there are exactly 5 or 6 columns, map them by standard position (OHLCV / OHLC A V)
     if len(df.columns) >= 4:
         if 'Close' not in df.columns:
             df['Close'] = df.iloc[:, 3]
-            print("⚠️ Mapped position 3 -> 'Close'")
         if 'High' not in df.columns and len(df.columns) >= 2:
             df['High'] = df.iloc[:, 1]
-            print("⚠️ Mapped position 1 -> 'High'")
         if 'Low' not in df.columns and len(df.columns) >= 3:
             df['Low'] = df.iloc[:, 2]
-            print("⚠️ Mapped position 2 -> 'Low'")
         if 'Volume' not in df.columns and len(df.columns) >= 5:
             if len(df.columns) > 4:
                 df['Volume'] = df.iloc[:, 4]
-                print("⚠️ Mapped position 4 -> 'Volume'")
-            elif len(df.columns) == 5:
-                df['Volume'] = df.iloc[:, 4]
             elif len(df.columns) == 6:
                 df['Volume'] = df.iloc[:, 5]
-                print("⚠️ Mapped position 5 -> 'Volume'")
 
-    # 4. Case-insensitive search for any remaining missing columns
     for col in df.columns:
         col_lower = col.lower()
         if 'close' in col_lower and 'Close' not in df.columns:
             df['Close'] = df[col]
-            print(f"⚠️ Found 'Close' via case-insensitive match: '{col}'")
-        if 'high' in col_lower and 'High' not in df.columns:
-            df['High'] = df[col]
-        if 'low' in col_lower and 'Low' not in df.columns:
-            df['Low'] = df[col]
         if 'volume' in col_lower and 'Volume' not in df.columns:
             df['Volume'] = df[col]
-            print(f"⚠️ Found 'Volume' via case-insensitive match: '{col}'")
 
-    # 5. Ensure all required columns are numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -128,7 +79,6 @@ def normalize_columns(df):
 def compute_technicals(df):
     """Calculate all technical indicators used by the bot."""
     df = normalize_columns(df)
-    
     close = df['Close']
     high = df['High']
     low = df['Low']
@@ -137,14 +87,12 @@ def compute_technicals(df):
     df['ema20'] = close.ewm(span=20, adjust=False).mean()
     df['ema50'] = close.ewm(span=50, adjust=False).mean()
 
-    # ATR (14)
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
 
-    # RSI (14)
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -159,7 +107,6 @@ def compute_technicals(df):
     return df
 
 def get_basic_fundamentals(symbol):
-    """Basic fundamental filter (P/E < 30, Debt/Equity < 2)."""
     try:
         info = yf.Ticker(symbol).info
         pe = info.get('trailingPE')
@@ -173,30 +120,22 @@ def get_basic_fundamentals(symbol):
         return True
 
 def generate_signals():
-    """
-    Generate BUY and SELL signals using the PROVEN 2x ATR Target / 1x ATR Stop Loss.
-    Returns up to 5 CALLs and 5 PUTs.
-    """
     calls = []
     puts = []
     
     for sym in SYMBOLS:
         try:
             df = yf.download(sym, period="6mo", interval="1d", progress=False, auto_adjust=True)
-            
             if df.empty or len(df) < 100:
-                print(f"⏭️ Skipping {sym}: Insufficient data")
                 continue
             
             df = normalize_columns(df)
             df = compute_technicals(df)
             latest = df.iloc[-1]
 
-            # Fundamental filter
             if not get_basic_fundamentals(sym):
                 continue
 
-            # Convert to float to avoid pandas Series comparison issues
             close_val = float(latest['Close'])
             ema50_val = float(latest['ema50'])
             rsi_val = float(latest['rsi'])
@@ -206,10 +145,8 @@ def generate_signals():
             low20_val = float(latest['low20'])
             atr_val = float(latest['atr'])
 
-            # Lenient volume condition
             vol_ok = volume_val > 0.9 * vol_avg_val
 
-            # --- CALL criteria (BUY) ---
             uptrend = close_val > ema50_val
             rsi_call_ok = 40 < rsi_val < 70
             near_high = close_val >= high20_val * 0.92
@@ -217,12 +154,10 @@ def generate_signals():
             if uptrend and rsi_call_ok and vol_ok and near_high:
                 entry = round(close_val, 2)
                 atr = round(atr_val, 2)
-                # ✅ 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
                 target = round(entry + 2 * atr, 2)
                 sl = round(entry - 1 * atr, 2)
                 calls.append((sym.replace('.NS',''), entry, target, sl))
 
-            # --- PUT criteria (SELL) ---
             downtrend = close_val < ema50_val
             rsi_put_ok = 30 < rsi_val < 60
             near_low = close_val <= low20_val * 1.08
@@ -230,40 +165,31 @@ def generate_signals():
             if downtrend and rsi_put_ok and vol_ok and near_low:
                 entry = round(close_val, 2)
                 atr = round(atr_val, 2)
-                # ✅ 2x ATR Target, 1x ATR Stop Loss (PROVEN PROFITABLE)
                 target = round(entry - 2 * atr, 2)
                 sl = round(entry + 1 * atr, 2)
                 puts.append((sym.replace('.NS',''), entry, target, sl))
                 
         except Exception as e:
-            print(f"⚠️ Error processing {sym}: {e}")
             continue
 
-    # Sort and return top 5
     calls.sort(key=lambda x: x[1], reverse=True)
     puts.sort(key=lambda x: x[1], reverse=True)
     return calls[:5], puts[:5]
 
 def send_report():
-    # --- DEBUG: Force print the Chat IDs the bot is using ---
-    print(f"🔍 DEBUG: CHAT_IDS list = {CHAT_IDS}")
-    # ------------------------------------------------
-    
-    send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
-    # ... rest of the code
-def send_report():
-    """Generate and send the daily report to Telegram."""
-    
-    # 🔔 INSTANT TEST MESSAGE – confirms Telegram connectivity
-    send_telegram("🔔 BOT INITIALIZED. Fetching market data, please wait...")
-
+    """Generate and print the report to console."""
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     date_str = now.strftime("%d %B %Y, %I:%M %p")
 
-    print(f"🔄 Generating signals for {date_str}...")
+    print("=" * 60)
+    print(f"🤖 NSE TRADING SIGNALS (CONSOLE TEST)")
+    print(f"📅 {date_str}")
+    print("=" * 60)
+
+    print("🔄 Generating signals... (Scanning 128 stocks)\n")
     calls, puts = generate_signals()
-    print(f"✅ Generated {len(calls)} CALLs and {len(puts)} PUTs")
+    print(f"✅ Generated {len(calls)} CALLs and {len(puts)} PUTs\n")
 
     message = f"🤖 NSE TRADING SIGNALS\n📅 {date_str}\n━━━━━━━━━━━━━━━\n\n"
 
@@ -283,10 +209,9 @@ def send_report():
 
     message += "━━━━━━━━━━━━━━━\n⚠️ SL mandatory | Targets based on 2x ATR (Proven Profitable)"
     
-    print("📤 Sending to Telegram...")
-    send_telegram(message)
-    print("✅ Report complete!")
+    # ✅ Print to console instead of sending to Telegram
+    print(message)
+    print("\n✅ Report complete!")
 
 if __name__ == "__main__":
-    print("🚀 Starting NSE Trading Bot...")
     send_report()
